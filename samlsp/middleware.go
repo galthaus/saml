@@ -1,8 +1,11 @@
 package samlsp
 
 import (
+	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/crewjam/saml"
 )
@@ -46,6 +49,11 @@ type Middleware struct {
 	Session         SessionProvider
 }
 
+func (m *Middleware) UpdateIDPMetadata(mds map[string]*saml.EntityDescriptor, lds map[string]*saml.EntityListData) {
+	m.ServiceProvider.IDPMetadata = mds
+	m.ServiceProvider.IDPListdata = lds
+}
+
 // ServeHTTP implements http.Handler and serves the SAML-specific HTTP endpoints
 // on the URIs specified by m.ServiceProvider.MetadataURL and
 // m.ServiceProvider.AcsURL.
@@ -54,12 +62,14 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.ServeMetadata(w, r)
 		return
 	}
-
 	if r.URL.Path == m.ServiceProvider.AcsURL.Path {
 		m.ServeACS(w, r)
 		return
 	}
-
+	if r.URL.Path == m.ServiceProvider.ListURL.Path {
+		m.ServeList(w, r)
+		return
+	}
 	http.NotFoundHandler().ServeHTTP(w, r)
 }
 
@@ -71,9 +81,26 @@ func (m *Middleware) ServeMetadata(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+// ServeList handles requests for the SAML ACS endpoint.
+func (m *Middleware) ServeList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/samllist+json")
+	answer := []string{}
+	for k := range m.ServiceProvider.IDPListdata {
+		answer = append(answer, k)
+	}
+	sort.Strings(answer)
+	dataAnswer := []interface{}{}
+	for _, k := range answer {
+		dataAnswer = append(dataAnswer, m.ServiceProvider.IDPListdata[k])
+	}
+	buf, _ := json.MarshalIndent(dataAnswer, "", "  ")
+	w.Write(buf)
+	return
+}
+
 // ServeACS handles requests for the SAML ACS endpoint.
 func (m *Middleware) ServeACS(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
+	err := r.ParseForm()
 
 	possibleRequestIDs := []string{}
 	if m.ServiceProvider.AllowIDPInitiated {
@@ -127,17 +154,28 @@ func (m *Middleware) HandleStartAuthFlow(w http.ResponseWriter, r *http.Request)
 		panic("don't wrap Middleware with RequireAccount")
 	}
 
+	samlId := r.Header.Get("SAML-IDP")
+	if samlId == "" {
+		samlId = r.URL.Query().Get("SAML-IDP")
+	}
+
 	var binding, bindingLocation string
 	if m.Binding != "" {
 		binding = m.Binding
-		bindingLocation = m.ServiceProvider.GetSSOBindingLocation(binding)
+		bindingLocation = m.ServiceProvider.GetSSOBindingLocation(samlId, binding)
 	} else {
 		binding = saml.HTTPRedirectBinding
-		bindingLocation = m.ServiceProvider.GetSSOBindingLocation(binding)
+		bindingLocation = m.ServiceProvider.GetSSOBindingLocation(samlId, binding)
 		if bindingLocation == "" {
 			binding = saml.HTTPPostBinding
-			bindingLocation = m.ServiceProvider.GetSSOBindingLocation(binding)
+			bindingLocation = m.ServiceProvider.GetSSOBindingLocation(samlId, binding)
 		}
+	}
+
+	if bindingLocation == "" {
+		err := fmt.Errorf("No SAML Identity Providers configured")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	authReq, err := m.ServiceProvider.MakeAuthenticationRequest(bindingLocation, binding)
@@ -194,7 +232,14 @@ func (m *Middleware) CreateSessionFromAssertion(w http.ResponseWriter, r *http.R
 		redirectURI = trackedRequest.URI
 	}
 
-	if err := m.Session.CreateSession(w, r, assertion); err != nil {
+	samlID, _ := m.ServiceProvider.FindMetadataByEntityID(assertion.Issuer.Value)
+	if samlID == "" {
+		err := fmt.Errorf("CreateSessionFromAssertion: unknown saml issuer: %s", assertion.Issuer.Value)
+		m.OnError(w, r, err)
+		return
+	}
+
+	if err := m.Session.CreateSession(w, r, samlID, assertion); err != nil {
 		m.OnError(w, r, err)
 		return
 	}

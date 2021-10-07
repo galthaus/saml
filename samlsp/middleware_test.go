@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/form3tech-oss/jwt-go"
+	jwt "github.com/dgrijalva/jwt-go"
 	dsig "github.com/russellhaering/goxmldsig"
 	"gotest.tools/assert"
 	is "gotest.tools/assert/cmp"

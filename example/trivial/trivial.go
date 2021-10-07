@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/crewjam/saml"
+
 	"github.com/crewjam/saml/samlsp"
 )
 
@@ -39,7 +41,7 @@ func main() {
 
 	samlSP, err := samlsp.New(samlsp.Options{
 		URL:         *rootURL,
-		IDPMetadata: idpMetadata,
+		IDPMetadata: map[string]*saml.EntityDescriptor{"samltest": idpMetadata},
 		Key:         keyPair.PrivateKey.(*rsa.PrivateKey),
 		Certificate: keyPair.Leaf,
 		SignRequest: true,

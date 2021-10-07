@@ -2,11 +2,12 @@
 package samlsp
 
 import (
-	"crypto/rsa"
+	"crypto"
 	"crypto/x509"
 	"net/http"
 	"net/url"
 
+	jwt "github.com/dgrijalva/jwt-go"
 	dsig "github.com/russellhaering/goxmldsig"
 
 	"github.com/crewjam/saml"
@@ -16,22 +17,25 @@ import (
 type Options struct {
 	EntityID          string
 	URL               url.URL
-	Key               *rsa.PrivateKey
+	Key               crypto.PrivateKey
 	Certificate       *x509.Certificate
 	Intermediates     []*x509.Certificate
 	AllowIDPInitiated bool
-	IDPMetadata       *saml.EntityDescriptor
+	IDPMetadata       map[string]*saml.EntityDescriptor
+	IDPListdata       map[string]*saml.EntityListData
 	SignRequest       bool
 	ForceAuthn        bool // TODO(ross): this should be *bool
 	CookieSameSite    http.SameSite
 	RelayStateFunc    func(w http.ResponseWriter, r *http.Request) string
+	SigningMethod     jwt.SigningMethod
+	SignatureMethod   string
 }
 
 // DefaultSessionCodec returns the default SessionCodec for the provided options,
 // a JWTSessionCodec configured to issue signed tokens.
 func DefaultSessionCodec(opts Options) JWTSessionCodec {
 	return JWTSessionCodec{
-		SigningMethod: defaultJWTSigningMethod,
+		SigningMethod: opts.SigningMethod,
 		Audience:      opts.URL.String(),
 		Issuer:        opts.URL.String(),
 		MaxAge:        defaultSessionMaxAge,
@@ -57,7 +61,7 @@ func DefaultSessionProvider(opts Options) CookieSessionProvider {
 // options, a JWTTrackedRequestCodec that uses a JWT to encode TrackedRequests.
 func DefaultTrackedRequestCodec(opts Options) JWTTrackedRequestCodec {
 	return JWTTrackedRequestCodec{
-		SigningMethod: defaultJWTSigningMethod,
+		SigningMethod: opts.SigningMethod,
 		Audience:      opts.URL.String(),
 		Issuer:        opts.URL.String(),
 		MaxAge:        saml.MaxIssueDelay,
@@ -84,12 +88,16 @@ func DefaultServiceProvider(opts Options) saml.ServiceProvider {
 	metadataURL := opts.URL.ResolveReference(&url.URL{Path: "saml/metadata"})
 	acsURL := opts.URL.ResolveReference(&url.URL{Path: "saml/acs"})
 	sloURL := opts.URL.ResolveReference(&url.URL{Path: "saml/slo"})
+	listURL := opts.URL.ResolveReference(&url.URL{Path: "saml/list"})
 
 	var forceAuthn *bool
 	if opts.ForceAuthn {
 		forceAuthn = &opts.ForceAuthn
 	}
 	signatureMethod := dsig.RSASHA1SignatureMethod
+	if opts.SignatureMethod != "" {
+		signatureMethod = opts.SignatureMethod
+	}
 	if !opts.SignRequest {
 		signatureMethod = ""
 	}
@@ -100,9 +108,11 @@ func DefaultServiceProvider(opts Options) saml.ServiceProvider {
 		Certificate:       opts.Certificate,
 		Intermediates:     opts.Intermediates,
 		MetadataURL:       *metadataURL,
+		ListURL:           *listURL,
 		AcsURL:            *acsURL,
 		SloURL:            *sloURL,
 		IDPMetadata:       opts.IDPMetadata,
+		IDPListdata:       opts.IDPListdata,
 		ForceAuthn:        forceAuthn,
 		SignatureMethod:   signatureMethod,
 		AllowIDPInitiated: opts.AllowIDPInitiated,

@@ -16,6 +16,7 @@ type Session interface{}
 type SessionWithAttributes interface {
 	Session
 	GetAttributes() Attributes
+	GetEntityID() string
 }
 
 // ErrNoSession is the error returned when the remote user does not have a session
@@ -27,7 +28,7 @@ type SessionProvider interface {
 	// CreateSession is called when we have received a valid SAML assertion and
 	// should create a new session and modify the http response accordingly, e.g. by
 	// setting a cookie.
-	CreateSession(w http.ResponseWriter, r *http.Request, assertion *saml.Assertion) error
+	CreateSession(w http.ResponseWriter, r *http.Request, samlID string, assertion *saml.Assertion) error
 
 	// DeleteSession is called to modify the response such that it removed the current
 	// session, e.g. by deleting a cookie.
@@ -42,7 +43,7 @@ type SessionProvider interface {
 // Session. The default implementation uses JWTs, JWTSessionCodec.
 type SessionCodec interface {
 	// New creates a Session from the SAML assertion.
-	New(assertion *saml.Assertion) (Session, error)
+	New(samlID string, assertion *saml.Assertion) (Session, error)
 
 	// Encode returns a serialized version of the Session.
 	//
@@ -86,4 +87,16 @@ func AttributeFromContext(ctx context.Context, name string) string {
 		return ""
 	}
 	return sa.GetAttributes().Get(name)
+}
+
+func SamlIDFromContext(ctx context.Context) string {
+	s := SessionFromContext(ctx)
+	if s == nil {
+		return ""
+	}
+	sa, ok := s.(SessionWithAttributes)
+	if !ok {
+		return ""
+	}
+	return sa.GetEntityID()
 }

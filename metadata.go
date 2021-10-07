@@ -36,6 +36,12 @@ type EntitiesDescriptor struct {
 // to saml.Metadata to be saml.EntityDescriptor.
 var Metadata = struct{}{}
 
+type EntityListData struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	LogoPath    string `json:"logoPath"`
+}
+
 // EntityDescriptor represents the SAML EntityDescriptor object.
 //
 // See http://docs.oasis-open.org/security/saml/v2.0/saml-metadata-2.0-os.pdf §2.3.2

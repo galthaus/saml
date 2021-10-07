@@ -1,14 +1,13 @@
 package samlsp
 
 import (
-	"crypto/rsa"
+	"crypto"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/form3tech-oss/jwt-go"
-
 	"github.com/crewjam/saml"
+	jwt "github.com/dgrijalva/jwt-go"
 )
 
 const (
@@ -23,7 +22,7 @@ type JWTSessionCodec struct {
 	Audience      string
 	Issuer        string
 	MaxAge        time.Duration
-	Key           *rsa.PrivateKey
+	Key           crypto.PrivateKey
 }
 
 var _ SessionCodec = JWTSessionCodec{}
@@ -31,15 +30,16 @@ var _ SessionCodec = JWTSessionCodec{}
 // New creates a Session from the SAML assertion.
 //
 // The returned Session is a JWTSessionClaims.
-func (c JWTSessionCodec) New(assertion *saml.Assertion) (Session, error) {
+func (c JWTSessionCodec) New(samlID string, assertion *saml.Assertion) (Session, error) {
 	now := saml.TimeNow()
 	claims := JWTSessionClaims{}
 	claims.SAMLSession = true
-	claims.Audience = []string{c.Audience}
+	claims.Audience = c.Audience
 	claims.Issuer = c.Issuer
 	claims.IssuedAt = now.Unix()
 	claims.ExpiresAt = now.Add(c.MaxAge).Unix()
 	claims.NotBefore = now.Unix()
+	claims.EntityID = samlID
 
 	if sub := assertion.Subject; sub != nil {
 		if nameID := sub.NameID; nameID != nil {
@@ -94,7 +94,7 @@ func (c JWTSessionCodec) Decode(signed string) (Session, error) {
 	}
 	claims := JWTSessionClaims{}
 	_, err := parser.ParseWithClaims(signed, &claims, func(*jwt.Token) (interface{}, error) {
-		return c.Key.Public(), nil
+		return c.Key.(crypto.Signer).Public(), nil
 	})
 	// TODO(ross): check for errors due to bad time and return ErrNoSession
 	if err != nil {
@@ -117,6 +117,7 @@ type JWTSessionClaims struct {
 	jwt.StandardClaims
 	Attributes  Attributes `json:"attr"`
 	SAMLSession bool       `json:"saml-session"`
+	EntityID    string     `json:"entity-id"`
 }
 
 var _ Session = JWTSessionClaims{}
@@ -124,6 +125,11 @@ var _ Session = JWTSessionClaims{}
 // GetAttributes implements SessionWithAttributes. It returns the SAMl attributes.
 func (c JWTSessionClaims) GetAttributes() Attributes {
 	return c.Attributes
+}
+
+// GetEntityID implements SessionWithAttributes. It returns the EntityID
+func (c JWTSessionClaims) GetEntityID() string {
+	return c.EntityID
 }
 
 // Attributes is a map of attributes provided in the SAML assertion

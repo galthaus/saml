@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/crewjam/saml"
+
 	"github.com/dchest/uniuri"
 	"github.com/kr/pretty"
 	"github.com/zenazn/goji"
@@ -134,7 +136,7 @@ func main() {
 		Key:               keyPair.PrivateKey.(*rsa.PrivateKey),
 		Certificate:       keyPair.Leaf,
 		AllowIDPInitiated: true,
-		IDPMetadata:       idpMetadata,
+		IDPMetadata:       map[string]*saml.EntityDescriptor{"ngrok": idpMetadata},
 	})
 	if err != nil {
 		panic(err) // TODO handle error

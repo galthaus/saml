@@ -3,7 +3,7 @@ package saml
 import (
 	"bytes"
 	"compress/flate"
-	"crypto/rsa"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -66,7 +66,7 @@ type ServiceProvider struct {
 	EntityID string
 
 	// Key is the RSA private key we use to sign requests.
-	Key *rsa.PrivateKey
+	Key crypto.PrivateKey
 
 	// Certificate is the RSA public part of Key.
 	Certificate   *x509.Certificate
@@ -80,12 +80,19 @@ type ServiceProvider struct {
 	// on this host, i.e. https://example.com/saml/acs
 	AcsURL url.URL
 
+	// ListURL is the full URL to the SAML IDP name list
+	// on this host, i.e. https://example.com/saml/list
+	ListURL url.URL
+
 	// SloURL is the full URL to the SAML Single Logout endpoint on this host.
 	// i.e. https://example.com/saml/slo
 	SloURL url.URL
 
-	// IDPMetadata is the metadata from the identity provider.
-	IDPMetadata *EntityDescriptor
+	// IDPMetadata is the metadata from the identity providers provided by name.
+	IDPMetadata map[string]*EntityDescriptor
+
+	// IDPListdata is the data for the caller to see in the list data
+	IDPListdata map[string]*EntityListData
 
 	// AuthnNameIDFormat is the format used in the NameIDPolicy for
 	// authentication requests
@@ -125,6 +132,28 @@ const DefaultValidDuration = time.Hour * 24 * 2
 
 // DefaultCacheDuration is how long we ask the IDP to cache the SP metadata.
 const DefaultCacheDuration = time.Hour * 24 * 1
+
+// FindMetadata - returns the metadata for an IDP short name
+func (sp *ServiceProvider) FindMetadata(samlID string) *EntityDescriptor {
+	md, ok := sp.IDPMetadata[samlID]
+	if !ok {
+		for _, mmm := range sp.IDPMetadata {
+			md = mmm
+			break
+		}
+	}
+	return md
+}
+
+// FindMetadataByEntityID - returns the shortname and metadata for an IDP name
+func (sp *ServiceProvider) FindMetadataByEntityID(entityID string) (string, *EntityDescriptor) {
+	for k, mmm := range sp.IDPMetadata {
+		if mmm.EntityID == entityID {
+			return k, mmm
+		}
+	}
+	return "", nil
+}
 
 // Metadata returns the service provider metadata
 func (sp *ServiceProvider) Metadata() *EntityDescriptor {
@@ -205,8 +234,8 @@ func (sp *ServiceProvider) Metadata() *EntityDescriptor {
 // MakeRedirectAuthenticationRequest creates a SAML authentication request using
 // the HTTP-Redirect binding. It returns a URL that we will redirect the user to
 // in order to start the auth process.
-func (sp *ServiceProvider) MakeRedirectAuthenticationRequest(relayState string) (*url.URL, error) {
-	req, err := sp.MakeAuthenticationRequest(sp.GetSSOBindingLocation(HTTPRedirectBinding), HTTPRedirectBinding)
+func (sp *ServiceProvider) MakeRedirectAuthenticationRequest(samlID, relayState string) (*url.URL, error) {
+	req, err := sp.MakeAuthenticationRequest(sp.GetSSOBindingLocation(samlID, HTTPRedirectBinding), HTTPRedirectBinding)
 	if err != nil {
 		return nil, err
 	}
@@ -260,8 +289,12 @@ func (req *AuthnRequest) Redirect(relayState string, sp *ServiceProvider) (*url.
 
 // GetSSOBindingLocation returns URL for the IDP's Single Sign On Service binding
 // of the specified type (HTTPRedirectBinding or HTTPPostBinding)
-func (sp *ServiceProvider) GetSSOBindingLocation(binding string) string {
-	for _, idpSSODescriptor := range sp.IDPMetadata.IDPSSODescriptors {
+func (sp *ServiceProvider) GetSSOBindingLocation(samlID, binding string) string {
+	md := sp.FindMetadata(samlID)
+	if md == nil {
+		return ""
+	}
+	for _, idpSSODescriptor := range md.IDPSSODescriptors {
 		for _, singleSignOnService := range idpSSODescriptor.SingleSignOnServices {
 			if singleSignOnService.Binding == binding {
 				return singleSignOnService.Location
@@ -273,8 +306,12 @@ func (sp *ServiceProvider) GetSSOBindingLocation(binding string) string {
 
 // GetSLOBindingLocation returns URL for the IDP's Single Log Out Service binding
 // of the specified type (HTTPRedirectBinding or HTTPPostBinding)
-func (sp *ServiceProvider) GetSLOBindingLocation(binding string) string {
-	for _, idpSSODescriptor := range sp.IDPMetadata.IDPSSODescriptors {
+func (sp *ServiceProvider) GetSLOBindingLocation(samlID, binding string) string {
+	md := sp.FindMetadata(samlID)
+	if md == nil {
+		return ""
+	}
+	for _, idpSSODescriptor := range md.IDPSSODescriptors {
 		for _, singleLogoutService := range idpSSODescriptor.SingleLogoutServices {
 			if singleLogoutService.Binding == binding {
 				return singleLogoutService.Location
@@ -286,12 +323,16 @@ func (sp *ServiceProvider) GetSLOBindingLocation(binding string) string {
 
 // getIDPSigningCerts returns the certificates which we can use to verify things
 // signed by the IDP in PEM format, or nil if no such certificate is found.
-func (sp *ServiceProvider) getIDPSigningCerts() ([]*x509.Certificate, error) {
+func (sp *ServiceProvider) getIDPSigningCerts(samlID string) ([]*x509.Certificate, error) {
 	var certStrs []string
+	md := sp.FindMetadata(samlID)
+	if md == nil {
+		return nil, fmt.Errorf("cannot find any metadta for %s", samlID)
+	}
 
 	// We need to include non-empty certs where the "use" attribute is
 	// either set to "signing" or is missing
-	for _, idpSSODescriptor := range sp.IDPMetadata.IDPSSODescriptors {
+	for _, idpSSODescriptor := range md.IDPSSODescriptors {
 		for _, keyDescriptor := range idpSSODescriptor.KeyDescriptors {
 			if keyDescriptor.KeyInfo.Certificate != "" {
 				switch keyDescriptor.Use {
@@ -412,8 +453,8 @@ func (sp *ServiceProvider) SignAuthnRequest(req *AuthnRequest) error {
 // MakePostAuthenticationRequest creates a SAML authentication request using
 // the HTTP-POST binding. It returns HTML text representing an HTML form that
 // can be sent presented to a browser to initiate the login process.
-func (sp *ServiceProvider) MakePostAuthenticationRequest(relayState string) ([]byte, error) {
-	req, err := sp.MakeAuthenticationRequest(sp.GetSSOBindingLocation(HTTPPostBinding), HTTPPostBinding)
+func (sp *ServiceProvider) MakePostAuthenticationRequest(samlID, relayState string) ([]byte, error) {
+	req, err := sp.MakeAuthenticationRequest(sp.GetSSOBindingLocation(samlID, HTTPPostBinding), HTTPPostBinding)
 	if err != nil {
 		return nil, err
 	}
@@ -620,10 +661,17 @@ func (sp *ServiceProvider) ParseXMLResponse(decodedResponseXML []byte, possibleR
 		retErr.PrivateErr = fmt.Errorf("response IssueInstant expired at %s", resp.IssueInstant.Add(MaxIssueDelay))
 		return nil, retErr
 	}
-	if resp.Issuer != nil && resp.Issuer.Value != sp.IDPMetadata.EntityID {
-		retErr.PrivateErr = fmt.Errorf("response Issuer does not match the IDP metadata (expected %q)", sp.IDPMetadata.EntityID)
+	if resp.Issuer == nil {
+		retErr.PrivateErr = fmt.Errorf("response Issuer is not specified (expected something)")
+		return nil, retErr
+
+	}
+	samlID, md := sp.FindMetadataByEntityID(resp.Issuer.Value)
+	if md == nil {
+		retErr.PrivateErr = fmt.Errorf("response Issuer does not match the IDP metadata: %q", resp.Issuer.Value)
 		return nil, retErr
 	}
+
 	if resp.Status.StatusCode.Value != StatusSuccess {
 		retErr.PrivateErr = ErrBadStatus{Status: resp.Status.StatusCode.Value}
 		return nil, retErr
@@ -645,7 +693,7 @@ func (sp *ServiceProvider) ParseXMLResponse(decodedResponseXML []byte, possibleR
 			return nil, retErr
 		}
 
-		if err = sp.validateSigned(responseEl); err != nil {
+		if err = sp.validateSigned(samlID, responseEl); err != nil {
 			retErr.PrivateErr = err
 			return nil, retErr
 		}
@@ -669,7 +717,7 @@ func (sp *ServiceProvider) ParseXMLResponse(decodedResponseXML []byte, possibleR
 			return nil, retErr
 		}
 		if responseSigned {
-			if err := sp.validateSigned(doc.Root()); err != nil {
+			if err := sp.validateSigned(samlID, doc.Root()); err != nil {
 				retErr.PrivateErr = err
 				return nil, retErr
 			}
@@ -707,7 +755,7 @@ func (sp *ServiceProvider) ParseXMLResponse(decodedResponseXML []byte, possibleR
 
 		// the decrypted assertion may be signed too
 		// otherwise, a signed response is sufficient
-		if err := sp.validateSigned(doc.Root()); err != nil && !responseSigned {
+		if err := sp.validateSigned(samlID, doc.Root()); err != nil && !responseSigned {
 			retErr.PrivateErr = err
 			return nil, retErr
 		}
@@ -737,8 +785,8 @@ func (sp *ServiceProvider) validateAssertion(assertion *Assertion, possibleReque
 	if assertion.IssueInstant.Add(MaxIssueDelay).Before(now) {
 		return fmt.Errorf("expired on %s", assertion.IssueInstant.Add(MaxIssueDelay))
 	}
-	if assertion.Issuer.Value != sp.IDPMetadata.EntityID {
-		return fmt.Errorf("issuer is not %q", sp.IDPMetadata.EntityID)
+	if _, md := sp.FindMetadataByEntityID(assertion.Issuer.Value); md == nil {
+		return fmt.Errorf("issuer is not %q", assertion.Issuer.Value)
 	}
 	for _, subjectConfirmation := range assertion.Subject.SubjectConfirmations {
 		requestIDvalid := false
@@ -828,7 +876,7 @@ func findChild(parentEl *etree.Element, childNS string, childTag string) (*etree
 
 // validateSigned returns a nil error iff each of the signatures on the Response and Assertion elements
 // are valid and there is at least one signature.
-func (sp *ServiceProvider) validateSigned(responseEl *etree.Element) error {
+func (sp *ServiceProvider) validateSigned(samlID string, responseEl *etree.Element) error {
 	haveSignature := false
 
 	// Some SAML responses have the signature on the Response object, and some on the Assertion
@@ -839,7 +887,7 @@ func (sp *ServiceProvider) validateSigned(responseEl *etree.Element) error {
 		return err
 	}
 	if sigEl != nil {
-		if err = sp.validateSignature(responseEl); err != nil {
+		if err = sp.validateSignature(samlID, responseEl); err != nil {
 			return fmt.Errorf("cannot validate signature on Response: %v", err)
 		}
 		haveSignature = true
@@ -855,7 +903,7 @@ func (sp *ServiceProvider) validateSigned(responseEl *etree.Element) error {
 			return err
 		}
 		if sigEl != nil {
-			if err = sp.validateSignature(assertionEl); err != nil {
+			if err = sp.validateSignature(samlID, assertionEl); err != nil {
 				return fmt.Errorf("cannot validate signature on Response: %v", err)
 			}
 			haveSignature = true
@@ -869,8 +917,8 @@ func (sp *ServiceProvider) validateSigned(responseEl *etree.Element) error {
 }
 
 // validateSignature returns nill iff the Signature embedded in the element is valid
-func (sp *ServiceProvider) validateSignature(el *etree.Element) error {
-	certs, err := sp.getIDPSigningCerts()
+func (sp *ServiceProvider) validateSignature(samlID string, el *etree.Element) error {
+	certs, err := sp.getIDPSigningCerts(samlID)
 	if err != nil {
 		return err
 	}
@@ -961,7 +1009,11 @@ func (sp *ServiceProvider) SignLogoutRequest(req *LogoutRequest) error {
 }
 
 // MakeLogoutRequest produces a new LogoutRequest object for idpURL.
-func (sp *ServiceProvider) MakeLogoutRequest(idpURL, nameID string) (*LogoutRequest, error) {
+func (sp *ServiceProvider) MakeLogoutRequest(samlID, idpURL, nameID string) (*LogoutRequest, error) {
+	md := sp.FindMetadata(samlID)
+	if md == nil {
+		return nil, fmt.Errorf("Failed to find metadata for %s", samlID)
+	}
 
 	req := LogoutRequest{
 		ID:           fmt.Sprintf("id-%x", randomBytes(20)),
@@ -975,7 +1027,7 @@ func (sp *ServiceProvider) MakeLogoutRequest(idpURL, nameID string) (*LogoutRequ
 		NameID: &NameID{
 			Format:          sp.nameIDFormat(),
 			Value:           nameID,
-			NameQualifier:   sp.IDPMetadata.EntityID,
+			NameQualifier:   md.EntityID,
 			SPNameQualifier: sp.Metadata().EntityID,
 		},
 	}
@@ -990,8 +1042,8 @@ func (sp *ServiceProvider) MakeLogoutRequest(idpURL, nameID string) (*LogoutRequ
 // MakeRedirectLogoutRequest creates a SAML authentication request using
 // the HTTP-Redirect binding. It returns a URL that we will redirect the user to
 // in order to start the auth process.
-func (sp *ServiceProvider) MakeRedirectLogoutRequest(nameID, relayState string) (*url.URL, error) {
-	req, err := sp.MakeLogoutRequest(sp.GetSLOBindingLocation(HTTPRedirectBinding), nameID)
+func (sp *ServiceProvider) MakeRedirectLogoutRequest(samlID, nameID, relayState string) (*url.URL, error) {
+	req, err := sp.MakeLogoutRequest(samlID, sp.GetSLOBindingLocation(samlID, HTTPRedirectBinding), nameID)
 	if err != nil {
 		return nil, err
 	}
@@ -1026,8 +1078,8 @@ func (req *LogoutRequest) Redirect(relayState string) *url.URL {
 // MakePostLogoutRequest creates a SAML authentication request using
 // the HTTP-POST binding. It returns HTML text representing an HTML form that
 // can be sent presented to a browser to initiate the logout process.
-func (sp *ServiceProvider) MakePostLogoutRequest(nameID, relayState string) ([]byte, error) {
-	req, err := sp.MakeLogoutRequest(sp.GetSLOBindingLocation(HTTPPostBinding), nameID)
+func (sp *ServiceProvider) MakePostLogoutRequest(samlID, nameID, relayState string) ([]byte, error) {
+	req, err := sp.MakeLogoutRequest(samlID, sp.GetSLOBindingLocation(samlID, HTTPPostBinding), nameID)
 	if err != nil {
 		return nil, err
 	}
@@ -1100,8 +1152,8 @@ func (sp *ServiceProvider) MakeLogoutResponse(idpURL, logoutRequestID string) (*
 // MakeRedirectLogoutResponse creates a SAML LogoutResponse using
 // the HTTP-Redirect binding. It returns a URL that we will redirect the user to
 // for LogoutResponse.
-func (sp *ServiceProvider) MakeRedirectLogoutResponse(logoutRequestID, relayState string) (*url.URL, error) {
-	resp, err := sp.MakeLogoutResponse(sp.GetSLOBindingLocation(HTTPRedirectBinding), logoutRequestID)
+func (sp *ServiceProvider) MakeRedirectLogoutResponse(samlID, logoutRequestID, relayState string) (*url.URL, error) {
+	resp, err := sp.MakeLogoutResponse(sp.GetSLOBindingLocation(samlID, HTTPRedirectBinding), logoutRequestID)
 	if err != nil {
 		return nil, err
 	}
@@ -1136,8 +1188,8 @@ func (resp *LogoutResponse) Redirect(relayState string) *url.URL {
 // MakePostLogoutResponse creates a SAML LogoutResponse using
 // the HTTP-POST binding. It returns HTML text representing an HTML form that
 // can be sent presented to a browser for LogoutResponse.
-func (sp *ServiceProvider) MakePostLogoutResponse(logoutRequestID, relayState string) ([]byte, error) {
-	resp, err := sp.MakeLogoutResponse(sp.GetSLOBindingLocation(HTTPPostBinding), logoutRequestID)
+func (sp *ServiceProvider) MakePostLogoutResponse(samlID, logoutRequestID, relayState string) ([]byte, error) {
+	resp, err := sp.MakeLogoutResponse(sp.GetSLOBindingLocation(samlID, HTTPPostBinding), logoutRequestID)
 	if err != nil {
 		return nil, err
 	}
@@ -1262,7 +1314,8 @@ func (sp *ServiceProvider) ValidateLogoutResponseForm(postFormData string) error
 		return fmt.Errorf("cannot unmarshal response: %s", err)
 	}
 
-	if err := sp.validateLogoutResponse(&resp); err != nil {
+	samlID, err := sp.validateLogoutResponse(&resp)
+	if err != nil {
 		return err
 	}
 
@@ -1272,7 +1325,7 @@ func (sp *ServiceProvider) ValidateLogoutResponseForm(postFormData string) error
 	}
 
 	responseEl := doc.Root()
-	if err = sp.validateSigned(responseEl); err != nil {
+	if err = sp.validateSigned(samlID, responseEl); err != nil {
 		return err
 	}
 
@@ -1307,7 +1360,8 @@ func (sp *ServiceProvider) ValidateLogoutResponseRedirect(queryParameterData str
 		return fmt.Errorf("unable to flate decode: %s", err)
 	}
 
-	if err := sp.validateLogoutResponse(&resp); err != nil {
+	samlID, err := sp.validateLogoutResponse(&resp)
+	if err != nil {
 		return err
 	}
 
@@ -1317,7 +1371,7 @@ func (sp *ServiceProvider) ValidateLogoutResponseRedirect(queryParameterData str
 	}
 
 	responseEl := doc.Root()
-	if err = sp.validateSigned(responseEl); err != nil {
+	if err = sp.validateSigned(samlID, responseEl); err != nil {
 		return err
 	}
 
@@ -1325,23 +1379,24 @@ func (sp *ServiceProvider) ValidateLogoutResponseRedirect(queryParameterData str
 }
 
 // validateLogoutResponse validates the LogoutResponse fields. Returns a nil error if the LogoutResponse is valid.
-func (sp *ServiceProvider) validateLogoutResponse(resp *LogoutResponse) error {
+func (sp *ServiceProvider) validateLogoutResponse(resp *LogoutResponse) (string, error) {
 	if resp.Destination != sp.SloURL.String() {
-		return fmt.Errorf("`Destination` does not match SloURL (expected %q)", sp.SloURL.String())
+		return "", fmt.Errorf("`Destination` does not match SloURL (expected %q)", sp.SloURL.String())
 	}
 
 	now := time.Now()
 	if resp.IssueInstant.Add(MaxIssueDelay).Before(now) {
-		return fmt.Errorf("issueInstant expired at %s", resp.IssueInstant.Add(MaxIssueDelay))
+		return "", fmt.Errorf("issueInstant expired at %s", resp.IssueInstant.Add(MaxIssueDelay))
 	}
-	if resp.Issuer.Value != sp.IDPMetadata.EntityID {
-		return fmt.Errorf("issuer does not match the IDP metadata (expected %q)", sp.IDPMetadata.EntityID)
+	samlID, md := sp.FindMetadataByEntityID(resp.Issuer.Value)
+	if md == nil {
+		return "", fmt.Errorf("issuer does not match the IDP metadata (expected %q)", resp.Issuer.Value)
 	}
 	if resp.Status.StatusCode.Value != StatusSuccess {
-		return fmt.Errorf("status code was not %s", StatusSuccess)
+		return "", fmt.Errorf("status code was not %s", StatusSuccess)
 	}
 
-	return nil
+	return samlID, nil
 }
 
 func firstSet(a, b string) string {
