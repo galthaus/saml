@@ -78,7 +78,11 @@ func (c JWTSessionCodec) Encode(s Session) (string, error) {
 	claims := s.(JWTSessionClaims) // this will panic if you pass the wrong kind of session
 
 	token := jwt.NewWithClaims(c.SigningMethod, claims)
-	signedString, err := token.SignedString(c.Key)
+	myKey := c.Key
+	if val, ok := c.Key.(string); ok {
+		myKey = []byte(val)
+	}
+	signedString, err := token.SignedString(myKey)
 	if err != nil {
 		return "", err
 	}

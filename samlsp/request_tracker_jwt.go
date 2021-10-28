@@ -46,7 +46,11 @@ func (s JWTTrackedRequestCodec) Encode(value TrackedRequest) (string, error) {
 		SAMLAuthnRequest: true,
 	}
 	token := jwt.NewWithClaims(s.SigningMethod, claims)
-	return token.SignedString(s.Key)
+	myKey := s.Key
+	if val, ok := s.Key.(string); ok {
+		myKey = []byte(val)
+	}
+	return token.SignedString(myKey)
 }
 
 // Decode returns a Tracked request from an encoded string.
