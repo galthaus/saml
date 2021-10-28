@@ -84,6 +84,7 @@ func (c JWTSessionCodec) Encode(s Session) (string, error) {
 	}
 	signedString, err := token.SignedString(myKey)
 	if err != nil {
+		fmt.Printf("GREG: signing error: %v %T %v\n", myKey, myKey, err)
 		return "", err
 	}
 
