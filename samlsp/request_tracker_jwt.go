@@ -50,11 +50,7 @@ func (s JWTTrackedRequestCodec) Encode(value TrackedRequest) (string, error) {
 	if val, ok := s.Key.(string); ok {
 		myKey = []byte(val)
 	}
-	ans, e := token.SignedString(myKey)
-	if e != nil {
-		fmt.Printf("GREG: signing error2: %v %T %v\n", myKey, myKey, e)
-	}
-	return ans, e
+	return token.SignedString(myKey)
 }
 
 // Decode returns a Tracked request from an encoded string.
